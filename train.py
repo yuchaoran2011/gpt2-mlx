@@ -1,8 +1,8 @@
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-import tiktoken
 
+from dataloader import DataLoaderLite
 from gpt2 import GPT, GPTConfig
 from inference import generate_text
 
@@ -10,16 +10,7 @@ model = GPT(GPTConfig())
 # Initialize model parameters (MLX is lazy by default)
 mx.eval(model.parameters())
 
-with open("input.txt", "r") as f:
-    text = f.read()
-
-enc = tiktoken.get_encoding("gpt2")
-input_ids = enc.encode(text)
-
-B, T = 4, 32
-buf = mx.array(input_ids[: B * T + 1])
-x = buf[:-1].reshape(B, T)
-y = buf[1:].reshape(B, T)
+train_loader = DataLoaderLite(B=4, T=32)
 
 optimizer = optim.AdamW(learning_rate=1e-4)
 optimizer.init(model.trainable_parameters())
@@ -31,7 +22,6 @@ def loss_fn(x, y):
     y = y.reshape(-1)
     # Shift logits and targets to align them for next-token prediction
     logits = model(x)
-    print(f"Model output dtype: {logits.dtype}")
     logits = logits.reshape(-1, model.config.vocab_size)
 
     # The dimensions of loss will be (B*T,), we take the mean to get a single scalar loss value
@@ -39,7 +29,9 @@ def loss_fn(x, y):
     return nn.losses.cross_entropy(logits, y, reduction="mean")
 
 
-for i in range(100):
+for i in range(10):
+    x, y = train_loader.next_batch()
+
     # Unlike in PyTorch, no need for zero_grad() in MLX.
     # When calling value_and_grad(), it computes the gradients from scratch for that specific forward pass.
     # There's no accumulation happening in the background.

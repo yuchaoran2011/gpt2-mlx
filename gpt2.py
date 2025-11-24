@@ -107,6 +107,29 @@ class GPT(nn.Module):
             "ln_f": nn.LayerNorm(config.n_embed),
         }
 
+        self.apply_to_modules(self._init_weights)
+
+    def _init_weights(self, path, module):
+        if isinstance(module, nn.Linear):
+            # Initialize weights with a normal distribution
+            module.weight = mx.random.normal(
+                shape=module.weight.shape,
+                dtype=module.weight.dtype,
+                loc=0.0,
+                scale=0.02,
+            )
+
+            if module.bias is not None:
+                module.bias = mx.zeros(module.bias.shape, dtype=module.bias.dtype)
+
+        elif isinstance(module, nn.Embedding):
+            module.weight = mx.random.normal(
+                shape=module.weight.shape,
+                dtype=module.weight.dtype,
+                loc=0.0,
+                scale=0.02,
+            )
+
     def __call__(self, idx, training=False):
         # The shape of idx is B, T
         # Because we are passing in a batch of sequences, where B is the batch size and T is the sequence length.
@@ -131,5 +154,7 @@ class GPT(nn.Module):
 
         # Weight tying: use embedding weights for output projection
         # This is equivalent to: logits = x @ self.transformer["wte"].weight.T
+        # https://github.com/ml-explore/mlx/blob/v0.30.0/python/mlx/nn/layers/embedding.py#L33-L40
         logits = self.transformer["wte"].as_linear(x)  # (B, T, vocab_size)
+
         return logits
