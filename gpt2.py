@@ -17,6 +17,7 @@ class CausalSelfAttention(nn.Module):
         # 2nd dimension will be 3 * n_embed to get q, k, v in one go
         self.c_attn = nn.Linear(config.n_embed, 3 * config.n_embed)
         self.c_proj = nn.Linear(config.n_embed, config.n_embed)
+        self.c_proj.APPLY_RESIDUAL_SCALE = 1.0
 
         # Use k=1 to get the upper triangular part above the main diagonal
         # By default k = 0 includes the main diagonal
@@ -64,6 +65,7 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embed, 4 * config.n_embed)
         self.gelu = nn.GELU()
         self.c_proj = nn.Linear(4 * config.n_embed, config.n_embed)
+        self.c_proj.APPLY_RESIDUAL_SCALE = 1.0
 
     def __call__(self, x):
         x = self.c_fc(x)
@@ -112,11 +114,17 @@ class GPT(nn.Module):
     def _init_weights(self, path, module):
         if isinstance(module, nn.Linear):
             # Initialize weights with a normal distribution
+            std = 0.02
+
+            # Account for the accumulation on the residual path
+            if hasattr(module, "APPLY_RESIDUAL_SCALE"):
+                std *= (2 * self.config.n_layers) ** -0.5
+
             module.weight = mx.random.normal(
                 shape=module.weight.shape,
                 dtype=module.weight.dtype,
                 loc=0.0,
-                scale=0.02,
+                scale=std,
             )
 
             if module.bias is not None:
