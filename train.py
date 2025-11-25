@@ -1,3 +1,5 @@
+import time
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
@@ -10,7 +12,10 @@ model = GPT(GPTConfig())
 # Initialize model parameters (MLX is lazy by default)
 mx.eval(model.parameters())
 
-train_loader = DataLoaderLite(B=4, T=32)
+# Similar to autocast in PyTorch, we convert the model to bfloat16 for faster training
+model.apply(lambda x: x.astype(mx.bfloat16))
+
+train_loader = DataLoaderLite(B=16, T=1024)
 
 optimizer = optim.AdamW(learning_rate=1e-4)
 optimizer.init(model.trainable_parameters())
@@ -30,8 +35,9 @@ def loss_fn(x, y):
 
 
 for i in range(10):
+    # Run 'sudo asitop' to monitor CPU usage
+    t0 = time.time()
     x, y = train_loader.next_batch()
-
     # Unlike in PyTorch, no need for zero_grad() in MLX.
     # When calling value_and_grad(), it computes the gradients from scratch for that specific forward pass.
     # There's no accumulation happening in the background.
@@ -40,9 +46,13 @@ for i in range(10):
     optimizer.update(model, grads)
     # Evaluate parameters after update to ensure changes are applied (MLX is lazy)
     mx.eval(model.parameters())
+    t1 = time.time()
+    dt = (t1 - t0) * 1000
+    tokens_per_sec = (x.shape[0] * x.shape[1]) / (t1 - t0)
+
     # Evaluate loss to get actual value
     loss_val = float(loss)
-    print(f"step {i}: loss {loss_val}")
+    print(f"step {i}: loss {loss_val}, dt {dt:.2f}ms, tok/sec {tokens_per_sec:.2f}")
 
 output = generate_text(
     model,

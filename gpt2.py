@@ -19,11 +19,11 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(config.n_embed, config.n_embed)
         self.c_proj.APPLY_RESIDUAL_SCALE = 1.0
 
+        # Equivalent to PyTorch's register_buffer
         # Use k=1 to get the upper triangular part above the main diagonal
         # By default k = 0 includes the main diagonal
         self.mask = mx.triu(mx.ones((1, 1, config.block_size, config.block_size)), k=1)
         # Freeze the mask so it's not included in gradient computation
-        # Equivalent to PyTorch's register_buffer
         self._no_grad.add("mask")
 
     def __call__(self, x):
@@ -38,12 +38,12 @@ class CausalSelfAttention(nn.Module):
         v = v.reshape(B, T, self.n_heads, self.head_size).transpose(0, 2, 1, 3)
 
         attn_scores = (q @ k.transpose(0, 1, 3, 2)) / mx.sqrt(
-            mx.array(self.head_size, dtype=mx.float32)
+            mx.array(self.head_size, dtype=mx.bfloat16)
         )
         # Use mask directly - mx.where handles float masks correctly
         attn_scores = mx.where(
             self.mask[:, :, :T, :T] > 0,
-            mx.array(float("-inf"), dtype=mx.float32),
+            mx.array(float("-inf"), dtype=mx.bfloat16),
             attn_scores,
         )
         attn_weights = mx.softmax(attn_scores, axis=-1)
@@ -137,6 +137,8 @@ class GPT(nn.Module):
                 loc=0.0,
                 scale=0.02,
             )
+
+        # LayerNorm weights are already initialized to 1.0 and biases to 0.0 by default
 
     def __call__(self, idx, training=False):
         # The shape of idx is B, T
