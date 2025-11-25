@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 import mlx.core as mx
@@ -37,20 +38,32 @@ class CausalSelfAttention(nn.Module):
         q = q.reshape(B, T, self.n_heads, self.head_size).transpose(0, 2, 1, 3)
         v = v.reshape(B, T, self.n_heads, self.head_size).transpose(0, 2, 1, 3)
 
-        attn_scores = (q @ k.transpose(0, 1, 3, 2)) / mx.sqrt(
-            mx.array(self.head_size, dtype=mx.bfloat16)
-        )
-        # Use mask directly - mx.where handles float masks correctly
-        attn_scores = mx.where(
-            self.mask[:, :, :T, :T] > 0,
-            mx.array(float("-inf"), dtype=mx.bfloat16),
-            attn_scores,
-        )
-        attn_weights = mx.softmax(attn_scores, axis=-1)
+        # Explicit attention computation
+        # attn_scores = (q @ k.transpose(0, 1, 3, 2)) / mx.sqrt(
+        #     mx.array(self.head_size, dtype=mx.bfloat16)
+        # )
+        # # Use mask directly - mx.where handles float masks correctly
+        # attn_scores = mx.where(
+        #     self.mask[:, :, :T, :T] > 0,
+        #     mx.array(float("-inf"), dtype=mx.bfloat16),
+        #     attn_scores,
+        # )
+        # attn_weights = mx.softmax(attn_scores, axis=-1)
 
-        attn_output = (
-            attn_weights @ v
-        )  # (B, n_heads, T, T) x (B, n_heads, T, head_size) -> (B, n_heads, T, head_size)
+        # attn_output = (
+        #     attn_weights @ v
+        # )  # (B, n_heads, T, T) x (B, n_heads, T, head_size) -> (B, n_heads, T, head_size)
+
+        # No noticeable performance difference was observed between flash attention and explicit attention on M3 Max
+        # Could be because GPU is already fully utilized and the HBM tax that Flash Attention avoids doesn't exist
+        # in the same way for Apple Silicon's unified memory architecture
+        attn_output = mx.fast.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            scale=(1.0 / math.sqrt(q.shape[-1])),
+            mask="causal",
+        )
 
         # Re-assemble all head outputs side by side
         attn_output = attn_output.transpose(0, 2, 1, 3).reshape(B, T, C)

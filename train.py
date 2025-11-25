@@ -1,4 +1,5 @@
 import time
+from functools import partial
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -8,7 +9,7 @@ from dataloader import DataLoaderLite
 from gpt2 import GPT, GPTConfig
 from inference import generate_text
 
-model = GPT(GPTConfig())
+model = GPT(GPTConfig(vocab_size=50304))
 # Initialize model parameters (MLX is lazy by default)
 mx.eval(model.parameters())
 
@@ -23,7 +24,7 @@ optimizer.init(model.trainable_parameters())
 
 # When deriving gradients, MLX tracks gradients for all trainable parameters automatically
 # Training parameters don't need to be an argument for loss_fn
-def loss_fn(x, y):
+def loss_fn(model, x, y):
     y = y.reshape(-1)
     # Shift logits and targets to align them for next-token prediction
     logits = model(x)
@@ -34,18 +35,31 @@ def loss_fn(x, y):
     return nn.losses.cross_entropy(logits, y, reduction="mean")
 
 
-for i in range(10):
+# See https://github.com/ml-explore/mlx-examples/blob/main/transformer_lm/main.py for an example of using mx.compile with optimizers
+# I observed marginal improvements on M3 Max to training efficiency. token/sec went from 10k to 11.5k
+# GPU was already close to full utilization
+state = [model.state, optimizer.state]
+
+
+@partial(mx.compile, inputs=state, outputs=state)
+def step(x, y):
+    # When calling value_and_grad(), it computes the gradients from scratch for that specific forward pass.
+    # There's no accumulation happening in the background.
+    loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
+    loss, grads = loss_and_grad_fn(model, x, y)
+    optimizer.update(model, grads)
+    return loss
+
+
+for i in range(50):
     # Run 'sudo asitop' to monitor CPU usage
     t0 = time.time()
     x, y = train_loader.next_batch()
     # Unlike in PyTorch, no need for zero_grad() in MLX.
-    # When calling value_and_grad(), it computes the gradients from scratch for that specific forward pass.
-    # There's no accumulation happening in the background.
-    loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
-    loss, grads = loss_and_grad_fn(x, y)
-    optimizer.update(model, grads)
-    # Evaluate parameters after update to ensure changes are applied (MLX is lazy)
-    mx.eval(model.parameters())
+    loss = step(x, y)
+
+    # Evaluate state after update to ensure changes are applied (MLX is lazy)
+    mx.eval(state)
     t1 = time.time()
     dt = (t1 - t0) * 1000
     tokens_per_sec = (x.shape[0] * x.shape[1]) / (t1 - t0)
