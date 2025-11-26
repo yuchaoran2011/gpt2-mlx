@@ -30,6 +30,47 @@ lr_schedule = optim.join_schedules([linear_schedule, cosine_schedule], [warmup_s
 optimizer = optim.AdamW(learning_rate=lr_schedule, betas=[0.9, 0.95], eps=1e-8)
 optimizer.init(model.trainable_parameters())
 
+optimizer_decay = optim.AdamW(learning_rate=1e-4, weight_decay=0.01)
+optimizer_skip_decay = optim.AdamW(learning_rate=1e-3, weight_decay=0.0)
+
+
+def split_grads_by_weight_decay(grads, grads_to_decay, grads_to_skip_decay):
+    for k, v in grads.items():
+        if isinstance(v, dict):
+            # Need to preserve the nested dictionary structure
+            # Otherwise two parameters with the same name under different modules would collide
+            # e.g. "layer1.weight" vs "layer2.weight"
+            grads_to_decay[k] = {}
+            grads_to_skip_decay[k] = {}
+            split_grads_by_weight_decay(v, grads_to_decay[k], grads_to_skip_decay[k])
+
+            # Remove empty nested dicts to avoid confusing the optimizer
+            if not grads_to_decay[k]:
+                del grads_to_decay[k]
+            if not grads_to_skip_decay[k]:
+                del grads_to_skip_decay[k]
+        # Deal with a list of Block modules in the hidden layers
+        elif isinstance(v, list):
+            grads_to_decay[k] = []
+            grads_to_skip_decay[k] = []
+            for i, item in enumerate(v):
+                if isinstance(item, dict):
+                    decay_dict = {}
+                    skip_dict = {}
+                    split_grads_by_weight_decay(item, decay_dict, skip_dict)
+                    grads_to_decay[k].append(decay_dict)
+                    grads_to_skip_decay[k].append(skip_dict)
+                else:
+                    if item.ndim < 2:
+                        grads_to_skip_decay[k].append(item)
+                    else:
+                        grads_to_decay[k].append(item)
+        else:
+            if v.ndim < 2:
+                grads_to_skip_decay[k] = v
+            else:
+                grads_to_decay[k] = v
+
 
 # When deriving gradients, MLX tracks gradients for all trainable parameters automatically
 # Training parameters don't need to be an argument for loss_fn
@@ -56,8 +97,15 @@ def step(x, y):
     # There's no accumulation happening in the background.
     loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
     loss, grads = loss_and_grad_fn(model, x, y)
-    clipped_grads, _ = clip_grad_norm(grads, max_norm=1.0)
-    optimizer.update(model, clipped_grads)
+
+    # Implement gradient clipping and weight decay
+    grads_to_decay, grads_to_skip_decay = {}, {}
+    split_grads_by_weight_decay(grads, grads_to_decay, grads_to_skip_decay)
+
+    clipped_grads_to_decay, _ = clip_grad_norm(grads_to_decay, max_norm=1.0)
+    clipped_grads_to_skip_decay, _ = clip_grad_norm(grads_to_skip_decay, max_norm=1.0)
+    optimizer_decay.update(model, clipped_grads_to_decay)
+    optimizer_skip_decay.update(model, clipped_grads_to_skip_decay)
     return loss
 
 
