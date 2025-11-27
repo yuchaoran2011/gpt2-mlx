@@ -29,8 +29,21 @@ linear_schedule = optim.linear_schedule(max_lr * 1 / warmup_steps, max_lr, warmu
 cosine_schedule = optim.cosine_decay(max_lr, max_steps - warmup_steps, min_lr)
 lr_schedule = optim.join_schedules([linear_schedule, cosine_schedule], [warmup_steps])
 
+# Create optimizers for parameters with and without weight decay
 optimizer_decay = optim.AdamW(learning_rate=1e-4, weight_decay=0.01)
 optimizer_skip_decay = optim.AdamW(learning_rate=1e-3, weight_decay=0.0)
+
+# Filter function for MultiOptimizer: returns True for parameters that should have weight decay
+# Parameters with ndim >= 2 (weights) get weight decay, ndim < 2 (biases/1D params) don't
+def should_apply_weight_decay(path, param):
+    """Returns True if parameter should have weight decay (ndim >= 2)."""
+    return param.ndim >= 2
+
+# Use MultiOptimizer to automatically route parameters to the correct optimizer
+optimizer = optim.MultiOptimizer(
+    optimizers=[optimizer_decay, optimizer_skip_decay],
+    filters=[should_apply_weight_decay]
+)
 
 total_batch_size = 524288  # 2**19, ~0.5M number of tokens
 B = 16  # micro-batch size
@@ -40,44 +53,6 @@ assert total_batch_size % (B * T) == 0, (
 )
 grad_accum_steps = total_batch_size // (B * T)
 print(f"Using gradient accumulation over {grad_accum_steps} steps")
-
-
-def split_grads_by_weight_decay(grads, grads_to_decay, grads_to_skip_decay):
-    for k, v in grads.items():
-        if isinstance(v, dict):
-            # Need to preserve the nested dictionary structure
-            # Otherwise two parameters with the same name under different modules would collide
-            # e.g. "layer1.weight" vs "layer2.weight"
-            grads_to_decay[k] = {}
-            grads_to_skip_decay[k] = {}
-            split_grads_by_weight_decay(v, grads_to_decay[k], grads_to_skip_decay[k])
-
-            # Remove empty nested dicts to avoid confusing the optimizer
-            if not grads_to_decay[k]:
-                del grads_to_decay[k]
-            if not grads_to_skip_decay[k]:
-                del grads_to_skip_decay[k]
-        # Deal with a list of Block modules in the hidden layers
-        elif isinstance(v, list):
-            grads_to_decay[k] = []
-            grads_to_skip_decay[k] = []
-            for i, item in enumerate(v):
-                if isinstance(item, dict):
-                    decay_dict = {}
-                    skip_dict = {}
-                    split_grads_by_weight_decay(item, decay_dict, skip_dict)
-                    grads_to_decay[k].append(decay_dict)
-                    grads_to_skip_decay[k].append(skip_dict)
-                else:
-                    if item.ndim < 2:
-                        grads_to_skip_decay[k].append(item)
-                    else:
-                        grads_to_decay[k].append(item)
-        else:
-            if v.ndim < 2:
-                grads_to_skip_decay[k] = v
-            else:
-                grads_to_decay[k] = v
 
 
 # When deriving gradients, MLX tracks gradients for all trainable parameters automatically
@@ -96,7 +71,7 @@ def loss_fn(model, x, y):
 # See https://github.com/ml-explore/mlx-examples/blob/main/transformer_lm/main.py for an example of using mx.compile with optimizers
 # I observed marginal improvements on M3 Max to training efficiency. token/sec went from 10k to 11.5k
 # GPU was already close to full utilization
-state = [model.state, optimizer_decay.state, optimizer_skip_decay.state]
+state = [model.state, optimizer.state]
 
 
 # Create loss_and_grad_fn once outside the loop to avoid recreating it
@@ -144,15 +119,13 @@ def step():
     # Ensure accumulated gradients are materialized before optimizer step
     mx.eval(grads_accum)
 
-    # Implement gradient clipping and weight decay
+    # Implement gradient clipping
     # https://github.com/ml-explore/mlx/issues/2837 has more details
-    grads_to_decay, grads_to_skip_decay = {}, {}
-    split_grads_by_weight_decay(grads_accum, grads_to_decay, grads_to_skip_decay)
-
-    clipped_grads_to_decay, _ = clip_grad_norm(grads_to_decay, max_norm=1.0)
-    clipped_grads_to_skip_decay, _ = clip_grad_norm(grads_to_skip_decay, max_norm=1.0)
-    optimizer_decay.update(model, clipped_grads_to_decay)
-    optimizer_skip_decay.update(model, clipped_grads_to_skip_decay)
+    clipped_grads, _ = clip_grad_norm(grads_accum, max_norm=1.0)
+    
+    # MultiOptimizer automatically routes parameters to the correct optimizer
+    # based on the filter function (weight decay for ndim >= 2, no decay for ndim < 2)
+    optimizer.update(model, clipped_grads)
     mx.eval(model.parameters())
     return loss_accum
 
