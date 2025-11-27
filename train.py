@@ -1,10 +1,12 @@
-import gc
+import logging
+import os
 import time
 from functools import partial
 
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
+import tiktoken
 from mlx.optimizers.optimizers import clip_grad_norm
 from mlx.utils import tree_map
 
@@ -12,19 +14,32 @@ from dataloader import DataLoaderLite
 from gpt2 import GPT, GPTConfig
 from inference import generate_text
 
+logging.basicConfig(
+    filename=os.path.join(os.path.dirname(__file__), "logs.txt"),
+    filemode="a",
+    format="%(asctime)s,%(msecs)03d %(name)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+# Get a logger instance
+logger = logging.getLogger("mlx-gpt")
+
 model = GPT(GPTConfig(vocab_size=50304))
 # Initialize model parameters (MLX is lazy by default)
 mx.eval(model.parameters())
 
+enc = tiktoken.get_encoding("gpt2")
+
 # Similar to autocast in PyTorch, we convert the model to bfloat16 for faster training
 model.apply(lambda x: x.astype(mx.bfloat16))
 
-train_loader = DataLoaderLite(B=16, T=1024)
+train_loader = DataLoaderLite(B=16, T=1024, split="train")
+val_loader = DataLoaderLite(B=16, T=1024, split="val")
 
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10
-max_steps = 50
+warmup_steps = 715
+max_steps = 19073
 linear_schedule = optim.linear_schedule(max_lr * 1 / warmup_steps, max_lr, warmup_steps)
 cosine_schedule = optim.cosine_decay(max_lr, max_steps - warmup_steps, min_lr)
 lr_schedule = optim.join_schedules([linear_schedule, cosine_schedule], [warmup_steps])
@@ -33,26 +48,28 @@ lr_schedule = optim.join_schedules([linear_schedule, cosine_schedule], [warmup_s
 optimizer_decay = optim.AdamW(learning_rate=1e-4, weight_decay=0.01)
 optimizer_skip_decay = optim.AdamW(learning_rate=1e-3, weight_decay=0.0)
 
+
 # Filter function for MultiOptimizer: returns True for parameters that should have weight decay
 # Parameters with ndim >= 2 (weights) get weight decay, ndim < 2 (biases/1D params) don't
 def should_apply_weight_decay(path, param):
     """Returns True if parameter should have weight decay (ndim >= 2)."""
     return param.ndim >= 2
 
+
 # Use MultiOptimizer to automatically route parameters to the correct optimizer
 optimizer = optim.MultiOptimizer(
     optimizers=[optimizer_decay, optimizer_skip_decay],
-    filters=[should_apply_weight_decay]
+    filters=[should_apply_weight_decay],
 )
 
 total_batch_size = 524288  # 2**19, ~0.5M number of tokens
-B = 16  # micro-batch size
+B = 32  # micro-batch size
 T = 1024  # sequence length
 assert total_batch_size % (B * T) == 0, (
     "make sure total_batch_size is divisible by B * T"
 )
 grad_accum_steps = total_batch_size // (B * T)
-print(f"Using gradient accumulation over {grad_accum_steps} steps")
+logger.info(f"Using gradient accumulation over {grad_accum_steps} steps")
 
 
 # When deriving gradients, MLX tracks gradients for all trainable parameters automatically
@@ -122,7 +139,7 @@ def step():
     # Implement gradient clipping
     # https://github.com/ml-explore/mlx/issues/2837 has more details
     clipped_grads, _ = clip_grad_norm(grads_accum, max_norm=1.0)
-    
+
     # MultiOptimizer automatically routes parameters to the correct optimizer
     # based on the filter function (weight decay for ndim >= 2, no decay for ndim < 2)
     optimizer.update(model, clipped_grads)
@@ -130,9 +147,29 @@ def step():
     return loss_accum
 
 
-for i in range(3):
+for i in range(max_steps):
     # Run 'sudo asitop' to monitor CPU usage
     t0 = time.time()
+
+    if i > 0 and i % 100 == 0 or i == max_steps - 1:
+        val_loader.reset()
+        val_loss_accum = 0.0
+        val_batches = 10
+        for _ in range(val_batches):
+            x_val, y_val = val_loader.next_batch()
+            val_loss = loss_fn(model, x_val, y_val)
+            mx.eval(val_loss)
+            val_loss_accum += float(val_loss)
+        val_loss_avg = val_loss_accum / val_batches
+        logger.info(f"step {i}: validation loss {val_loss_avg}")
+
+        num_return_sequences = 4
+        tokens = enc.encode("On a remote island, ")
+        tokens = mx.array(tokens, dtype=mx.int32)
+        tokens = mx.tile(mx.expand_dims(tokens, axis=0), (num_return_sequences, 1))
+        logger.info(
+            generate_text(model, prompt="On a remote island, ", max_new_tokens=50)
+        )
 
     # Unlike in PyTorch, no need for zero_grad() in MLX.
     loss = step()
@@ -145,7 +182,9 @@ for i in range(3):
 
     # loss is already a Python float from step(), but ensure it's not an array
     loss_val = float(loss) if isinstance(loss, mx.array) else loss
-    print(f"step {i}: loss {loss_val}, dt {dt:.2f}ms, tok/sec {tokens_per_sec:.2f}")
+    logger.info(
+        f"step {i}: loss {loss_val}, dt {dt:.2f}ms, tok/sec {tokens_per_sec:.2f}"
+    )
 
 output = generate_text(
     model,
@@ -154,4 +193,4 @@ output = generate_text(
     temperature=1,
     top_k=40,
 )
-print(output)
+logger.info(output)
