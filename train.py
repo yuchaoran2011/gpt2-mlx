@@ -103,14 +103,27 @@ state = [model.state, optimizer_decay.state, optimizer_skip_decay.state]
 loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
 
 
-# @partial(mx.compile, inputs=state, outputs=state)
+# Compile only the forward/backward pass, not the gradient accumulation loop
+# This allows me to use mx.eval() during accumulation to free computation graphs
+# otherwise memory will be quickly exhausted causing the machine to crash
+@partial(mx.compile, inputs=state, outputs=state)
+def forward_backward(x, y):
+    """Compiled forward and backward pass for a single micro-batch."""
+    loss, grads = loss_and_grad_fn(model, x, y)
+    return loss, grads
+
+
 def step():
+    """Step function with gradient accumulation. Not compiled to allow mx.eval() calls."""
     loss_accum = 0.0
     grads_accum = None
-    for accum_step in range(grad_accum_steps):
+
+    for _ in range(grad_accum_steps):
         x, y = train_loader.next_batch()
-        loss, grads = loss_and_grad_fn(model, x, y)
+        loss, grads = forward_backward(x, y)
+
         # Evaluate loss and gradients immediately to materialize them and free computation graph
+        # This is critical for memory management during gradient accumulation
         mx.eval(loss, grads)
 
         # Accumulate gradients
@@ -118,7 +131,7 @@ def step():
             grads_accum = grads
         else:
             # Unlike in PyTorch, each forward pass computes the gradients from scratch for that specific forward pass
-            # There's no accumulation happenin, hence manual accumulation via tree_map is needed
+            # There's no accumulation happening, hence manual accumulation via tree_map is needed
             # tree_map applies the given function recursively to each leaf node in the tree structure
             grads_accum = tree_map(lambda a, b: a + b, grads_accum, grads)
             # Evaluate the accumulated result immediately to free computation graph
@@ -128,7 +141,8 @@ def step():
         loss_val = float(loss) / grad_accum_steps
         loss_accum += loss_val
 
-    mx.eval(loss_accum, grads_accum)
+    # Ensure accumulated gradients are materialized before optimizer step
+    mx.eval(grads_accum)
 
     # Implement gradient clipping and weight decay
     # https://github.com/ml-explore/mlx/issues/2837 has more details
