@@ -1,6 +1,8 @@
 import mlx.core as mx
 import tiktoken
 
+from train import VOCAB_SIZE
+
 
 def generate_text(model, prompt, max_new_tokens=100, temperature=1.0, top_k=None):
     enc = tiktoken.get_encoding("gpt2")
@@ -10,6 +12,9 @@ def generate_text(model, prompt, max_new_tokens=100, temperature=1.0, top_k=None
     while input_ids.shape[1] < max_new_tokens + len(enc.encode(prompt)):
         logits = model(input_ids)  # Forward pass through the model
         logits = logits[:, -1, :] / temperature  # Focus on the last token
+
+        # Ensure logits shape matches VOCAB_SIZE
+        logits = logits[:, :VOCAB_SIZE]
 
         if top_k is not None:
             # top_k_values shape: (batch_size, top_k)

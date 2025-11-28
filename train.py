@@ -10,9 +10,12 @@ import tiktoken
 from mlx.optimizers.optimizers import clip_grad_norm
 from mlx.utils import tree_map
 
+from checkpoint import load_checkpoint, save_checkpoint
 from dataloader import DataLoaderLite
 from gpt2 import GPT, GPTConfig
 from inference import generate_text
+
+VOCAB_SIZE = 50304  # GPT-2 vocabulary size
 
 logging.basicConfig(
     filename=os.path.join(os.path.dirname(__file__), "logs.txt"),
@@ -24,7 +27,12 @@ logging.basicConfig(
 # Get a logger instance
 logger = logging.getLogger("mlx-gpt")
 
-model = GPT(GPTConfig(vocab_size=50304))
+# Checkpoint directory
+checkpoint_dir = "checkpoints"
+os.makedirs(checkpoint_dir, exist_ok=True)
+
+
+model = GPT(GPTConfig(vocab_size=VOCAB_SIZE))
 # Initialize model parameters (MLX is lazy by default)
 mx.eval(model.parameters())
 
@@ -61,6 +69,9 @@ optimizer = optim.MultiOptimizer(
     optimizers=[optimizer_decay, optimizer_skip_decay],
     filters=[should_apply_weight_decay],
 )
+
+# Try to load checkpoint and resume training
+start_step = load_checkpoint(model, optimizer, checkpoint_dir)
 
 total_batch_size = 524288  # 2**19, ~0.5M number of tokens
 B = 32  # micro-batch size
@@ -147,9 +158,13 @@ def step():
     return loss_accum
 
 
-for i in range(max_steps):
+for i in range(start_step, max_steps):
     # Run 'sudo asitop' to monitor CPU usage
     t0 = time.time()
+
+    # Save checkpoint periodically (every 1000 steps) and at validation steps (every 100 steps)
+    if i > 0 and (i % 1000 == 0 or (i % 100 == 0 and i % 1000 != 0)):
+        save_checkpoint(model, optimizer, i, checkpoint_dir)
 
     if i > 0 and i % 100 == 0 or i == max_steps - 1:
         val_loader.reset()
@@ -194,3 +209,7 @@ output = generate_text(
     top_k=40,
 )
 logger.info(output)
+
+# Save final checkpoint
+save_checkpoint(model, optimizer, max_steps - 1, checkpoint_dir, is_final=True)
+logger.info("Training completed. Final checkpoint saved.")
