@@ -6,6 +6,13 @@ This blog post documents my experience implementing a GPT-2 transformer model fr
 
 Transformers have revolutionized natural language processing, and GPT-2 is a seminal model in this space. Even though it's now considered ancient in the fast-evolving LLM space, implementing it from scratch still provides rich educational value, allowing me to explore the intricacies of transformer architectures, attention mechanisms, and model training. Additionally, using MLX provided an opportunity to optimize the model for Apple Silicon, leveraging its unified memory architecture.
 
+---
+**NOTE**
+
+[MLX Transform LM example](https://github.com/ml-explore/mlx-examples/blob/main/transformer_lm/main.py) provided by the official examples repo was helpful as I built out my implementation.
+
+---
+
 ## Key Learnings
 
 I'll skip the basics of transformers and GPT-2 architecture, assuming familiarity. Here are some specific learnings from the implementation process:
@@ -22,7 +29,7 @@ The most significant difference between MLX and PyTorch is **lazy evaluation**. 
 
 #### How It Works
 
-In PyTorch, operations execute eagerly—when you write `z = x + y`, the addition happens immediately. In MLX, operations build a computation graph that only executes when explicitly materialized via `mx.eval()` or when the result is needed (e.g., converting to a Python scalar or NumPy array).
+In PyTorch, operations execute eagerly (e.g., when you write `z = x + y`, the addition happens immediately). In MLX, operations build a computation graph that only executes when explicitly materialized via `mx.eval()` or when the result is needed (e.g., converting to a Python scalar or NumPy array).
 
 This is similar to JAX's approach but distinct from PyTorch's eager execution model. The MLX documentation provides a [detailed explanation of lazy evaluation](https://ml-explore.github.io/mlx/build/html/usage/lazy_evaluation.html).
 
