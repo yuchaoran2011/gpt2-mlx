@@ -70,8 +70,12 @@ def get_lr_python(step: int) -> float:
 
 
 # Create optimizers for parameters with and without weight decay
-optimizer_decay = optim.AdamW(learning_rate=lr_schedule, weight_decay=0.01)
-optimizer_skip_decay = optim.AdamW(learning_rate=lr_schedule, weight_decay=0.0)
+optimizer_decay = optim.AdamW(
+    learning_rate=lr_schedule, weight_decay=0.01, betas=[0.9, 0.95]
+)
+optimizer_skip_decay = optim.AdamW(
+    learning_rate=lr_schedule, weight_decay=0.0, betas=[0.9, 0.95]
+)
 
 
 # Filter function for MultiOptimizer: returns True for parameters that should have weight decay
@@ -88,7 +92,9 @@ optimizer = optim.MultiOptimizer(
 )
 
 # Try to load checkpoint and resume training
-start_step, _ = load_checkpoint(model, optimizer, checkpoint_dir, data_loader=train_loader)
+start_step, _ = load_checkpoint(
+    model, optimizer, checkpoint_dir, data_loader=train_loader
+)
 
 total_batch_size = 524288  # 2**19, ~0.5M number of tokens
 B = 32  # micro-batch size
@@ -195,12 +201,12 @@ for i in range(start_step, max_steps):
         val_loss_avg = val_loss_accum / val_batches
         logger.info(f"step {i}: validation loss {val_loss_avg}")
 
-        num_return_sequences = 4
+        num_return_sequences = 3
         tokens = enc.encode("On a remote island, ")
         tokens = mx.array(tokens, dtype=mx.int32)
         tokens = mx.tile(mx.expand_dims(tokens, axis=0), (num_return_sequences, 1))
         logger.info(
-            generate_text(model, prompt="On a remote island, ", max_new_tokens=50)
+            generate_text(model, prompt=tokens, max_new_tokens=50, temperature=0.2)
         )
 
     # Unlike in PyTorch, no need for zero_grad() in MLX.
@@ -221,9 +227,11 @@ for i in range(start_step, max_steps):
         f"step {i}: loss {loss_val}, grad_norm {grad_norm_val:.6f}, lr {current_lr:.2e}, dt {dt:.2f}ms, tok/sec {tokens_per_sec:.2f}"
     )
 
+tokens = enc.encode("Once upon a time")
+tokens = mx.array(tokens, dtype=mx.int32)
 output = generate_text(
     model,
-    prompt="Once upon a time",
+    prompt=tokens,
     max_new_tokens=50,
     temperature=1,
     top_k=40,
@@ -231,5 +239,12 @@ output = generate_text(
 logger.info(output)
 
 # Save final checkpoint
-save_checkpoint(model, optimizer, max_steps - 1, checkpoint_dir, is_final=True, data_loader=train_loader)
+save_checkpoint(
+    model,
+    optimizer,
+    max_steps - 1,
+    checkpoint_dir,
+    is_final=True,
+    data_loader=train_loader,
+)
 logger.info("Training completed. Final checkpoint saved.")
